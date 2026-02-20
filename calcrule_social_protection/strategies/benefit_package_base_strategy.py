@@ -1,4 +1,7 @@
 import logging
+import uuid as uuid_module
+import decimal
+from datetime import datetime as py_datetime
 
 from django.db import transaction
 
@@ -6,9 +9,14 @@ from calcrule_social_protection.apps import CalcruleSocialProtectionConfig
 from core.models import User
 from core.utils import convert_to_python_value
 from core.signals import register_service_signal
-from invoice.models import Bill
+from invoice.models import Bill, BillItem
 from invoice.services import BillService
 from social_protection.models import BeneficiaryStatus
+from payroll.models import (
+    BenefitConsumption,
+    BenefitAttachment,
+    PayrollBenefitConsumption,
+)
 from payroll.services import BenefitConsumptionService, PayrollService
 from tasks_management.apps import TasksManagementConfig
 from tasks_management.models import Task
@@ -33,7 +41,7 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
         # each beneficiary group from benefit plan assigned to this payment plan is a single benefit
         payroll = kwargs.get('payroll', None)
         beneficiaries = kwargs.get('beneficiaries_queryset', None)
-        if not beneficiaries:
+        if beneficiaries is None:
             beneficiaries = cls.BENEFICIARY_OBJECT.objects.filter(
                 benefit_plan=payment_plan.benefit_plan, status=BeneficiaryStatus.ACTIVE
             )
@@ -47,9 +55,24 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
         if payment_plan_parameters['calculation_rule']['limit_per_single_transaction'] != "":
             limit = float(payment_plan_parameters['calculation_rule']['limit_per_single_transaction'])
         advanced_filters_criteria = payment_plan_parameters['advanced_criteria'] if 'advanced_criteria' in payment_plan_parameters else []
+
+        beneficiary_count = len(beneficiaries)
+        converter = cls._init_converter(cls.CONVERTER, beneficiary_count, payroll)
+        converter_benefit = cls._init_converter(cls.CONVERTER_BENEFIT, beneficiary_count, payroll)
+        cls._prefetch_converter_data(converter_benefit, beneficiaries)
+
+        # Pre-compute which beneficiaries match each advanced criterion (M queries instead of M*N)
+        criteria_match_sets = cls._precompute_criteria_matches(
+            beneficiaries, advanced_filters_criteria
+        )
+
+        # Collect results for batch creation
+        batch_bill_results = []
+        batch_benefit_results = []
+
         for beneficiary in beneficiaries:
-            calculated_payment = cls._calculate_payment(
-                beneficiary, advanced_filters_criteria, payment, limit
+            calculated_payment, is_exceed = cls._calculate_payment_from_precomputed(
+                beneficiary, advanced_filters_criteria, criteria_match_sets, payment, limit
             )
 
             additional_params = {
@@ -59,12 +82,102 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
                 "end_date": end_date,
                 "payment_cycle": payment_cycle,
                 "payroll": payroll,
+                "converter": converter,
+                "converter_benefit": converter_benefit,
             }
-            calculation.run_convert(
-                payment_plan,
-                **additional_params
+
+            if is_exceed:
+                # Exceed-limit items are still handled individually via task creation
+                # Set class flag for the convert() method which reads it
+                cls.is_exceed_limit = True
+                calculation.run_convert(
+                    payment_plan,
+                    **additional_params
+                )
+            else:
+                # Collect convert results for batch creation
+                convert_results, convert_results_benefit = cls._collect_convert_results(
+                    calculation, payment_plan, **additional_params
+                )
+                batch_bill_results.append(convert_results)
+                batch_benefit_results.append(convert_results_benefit)
+
+        # Bulk create all non-exceed-limit items
+        if batch_bill_results:
+            cls.create_and_save_business_entities_batch(
+                batch_bill_results,
+                batch_benefit_results,
+                payroll.id if payroll else None,
+                user
             )
+
         return "Calculation and transformation into bills completed successfully."
+
+    @classmethod
+    def _collect_convert_results(cls, calculation, payment_plan, **kwargs):
+        """Collect convert results without saving to DB. Used for batch creation.
+
+        Subclasses should override this to resolve entity from their specific
+        beneficiary type key (e.g., 'beneficiary' or 'group') and set converter_item.
+        """
+        entity = kwargs.get('entity', None)
+        amount = kwargs.get('amount', None)
+        end_date = kwargs.get('end_date', None)
+        converter = kwargs.get('converter')
+        converter_item = kwargs.get('converter_item')
+        converter_benefit = kwargs.get('converter_benefit')
+        payment_cycle = kwargs.get('payment_cycle')
+        convert_results = cls._convert_entity_to_bill(
+            converter, converter_item, payment_plan, entity, amount, end_date, payment_cycle
+        )
+        convert_results['user'] = kwargs.get('user', None)
+        convert_results_benefit = cls._convert_entity_to_benefit(
+            converter_benefit, payment_plan, entity, amount, payment_cycle
+        )
+        return convert_results, convert_results_benefit
+
+    @classmethod
+    def _precompute_criteria_matches(cls, beneficiaries, advanced_filters_criteria):
+        """Pre-compute which beneficiaries match each advanced criterion.
+
+        Returns a list of sets, one per criterion, containing the IDs of
+        beneficiaries that match that criterion. This replaces M*N individual
+        exists() queries with M batch queries.
+        """
+        if not advanced_filters_criteria:
+            return []
+
+        criteria_match_sets = []
+        for criterion in advanced_filters_criteria:
+            condition = criterion['custom_filter_condition']
+            condition_key, condition_value = condition.split("=")
+            json_key, lookup = condition_key.split('__')[0:2]
+            parsed_condition_value = convert_to_python_value(condition_value)
+
+            matching_ids = set(
+                cls.BENEFICIARY_OBJECT.objects.filter(
+                    id__in=[b.id for b in beneficiaries],
+                    **{f'json_ext__{json_key}__{lookup}': parsed_condition_value}
+                ).values_list('id', flat=True)
+            )
+            criteria_match_sets.append(matching_ids)
+
+        return criteria_match_sets
+
+    @classmethod
+    def _calculate_payment_from_precomputed(
+            cls, beneficiary, advanced_filters_criteria, criteria_match_sets, payment, limit
+    ):
+        """Calculate payment using pre-computed criteria match sets instead of per-row queries.
+
+        Returns (calculated_payment, is_exceed_limit) tuple.
+        """
+        for i, criterion in enumerate(advanced_filters_criteria):
+            calculated_amount = float(criterion['amount'])
+            if beneficiary.id in criteria_match_sets[i]:
+                payment += calculated_amount
+        is_exceed = (payment > limit) if limit else False
+        return payment, is_exceed
 
     @classmethod
     def _calculate_payment(cls, beneficiary, advanced_filters_criteria, payment, limit):
@@ -89,6 +202,22 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
                         id=beneficiary.id, **{f'json_ext__{json_key}__{lookup}': parsed_condition_value}
                     ).exists()
         return False
+
+    @classmethod
+    def _init_converter(cls, converter_cls, count, payroll):
+        if converter_cls is None:
+            return None
+        instance = converter_cls()
+        if payroll:
+            instance._pregenerate_codes(count)
+        return instance
+
+    @classmethod
+    def _prefetch_converter_data(cls, converter_benefit, beneficiaries):
+        """Hook for subclasses to prefetch data needed by converters.
+        Override in group strategy to prefetch recipients.
+        """
+        pass
 
     @classmethod
     def convert(cls, payment_plan, **kwargs):
@@ -142,6 +271,170 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
                     payroll_service = PayrollService(user=user)
                     payroll_service.attach_benefit_to_payroll(payroll_id, benefit_id)
         return result_bill_creation
+
+    @classmethod
+    @transaction.atomic
+    def create_and_save_business_entities_batch(
+            cls, batch_bill_results, batch_benefit_results, payroll_id, user
+    ):
+        """Bulk create all Bills, BillItems, BenefitConsumptions, BenefitAttachments,
+        and PayrollBenefitConsumptions in batch instead of one-at-a-time.
+
+        Each entry in batch_bill_results corresponds to one beneficiary's bill data:
+            {'bill_data': dict, 'bill_data_line': [dict, ...], 'user': User}
+        Each entry in batch_benefit_results corresponds to one beneficiary's benefit data:
+            {'benefit_data': dict}
+        """
+        now = py_datetime.now()
+
+        bill_instances = []
+        bill_item_instances = []
+        benefit_instances = []
+        attachment_instances = []
+        payroll_benefit_instances = []
+
+        for bill_result, benefit_result in zip(
+            batch_bill_results, batch_benefit_results
+        ):
+            bill_data = bill_result['bill_data']
+            bill_line_items = bill_result['bill_data_line']
+            benefit_data = benefit_result['benefit_data']
+
+            # Pre-assign UUIDs for FK linking
+            bill_uuid = uuid_module.uuid4()
+            benefit_uuid = uuid_module.uuid4()
+
+            # Build Bill instance
+            bill = Bill(
+                id=bill_uuid,
+                subject_type_id=bill_data.get('subject_type_id'),
+                subject_id=bill_data.get('subject_id'),
+                thirdparty_type_id=bill_data.get('thirdparty_type_id'),
+                thirdparty_id=bill_data.get('thirdparty_id'),
+                code=bill_data.get('code'),
+                code_tp=bill_data.get('code_tp'),
+                code_ext=bill_data.get('code_ext'),
+                date_due=bill_data.get('date_due'),
+                date_bill=bill_data.get('date_bill'),
+                date_valid_from=bill_data.get('date_valid_from'),
+                date_valid_to=bill_data.get('date_valid_to'),
+                currency_tp_code=bill_data.get('currency_tp_code'),
+                currency_code=bill_data.get('currency_code'),
+                status=bill_data.get('status', Bill.Status.VALIDATED),
+                terms=bill_data.get('terms'),
+                note=bill_data.get('note'),
+                # Compute totals from line items
+                amount_net=cls._sum_line_items(bill_line_items, 'amount_total'),
+                amount_total=cls._sum_line_items(bill_line_items, 'amount_total'),
+                amount_discount=cls._sum_line_items_discount(bill_line_items),
+                # Audit fields (bypassing HistoryModel.save())
+                user_created=user,
+                user_updated=user,
+                date_created=now,
+                date_updated=now,
+                version=1,
+            )
+            bill_instances.append(bill)
+
+            # Build BillItem instances
+            for line_item_data in bill_line_items:
+                bill_item = BillItem(
+                    id=uuid_module.uuid4(),
+                    bill_id=bill_uuid,
+                    line_type_id=line_item_data.get('line_type_id'),
+                    line_id=line_item_data.get('line_id'),
+                    code=line_item_data.get('code', ''),
+                    quantity=line_item_data.get('quantity', 1),
+                    unit_price=line_item_data.get('unit_price', 0),
+                    amount_total=line_item_data.get('amount_total', 0),
+                    amount_net=line_item_data.get('amount_total', 0),
+                    discount=line_item_data.get('discount', 0),
+                    deduction=line_item_data.get('deduction', 0),
+                    date_valid_from=line_item_data.get('date_valid_from'),
+                    date_valid_to=line_item_data.get('date_valid_to'),
+                    # Audit fields
+                    user_created=user,
+                    user_updated=user,
+                    date_created=now,
+                    date_updated=now,
+                    version=1,
+                )
+                bill_item_instances.append(bill_item)
+
+            # Build BenefitConsumption instance
+            benefit = BenefitConsumption(
+                id=benefit_uuid,
+                individual_id=benefit_data.get('individual_id'),
+                code=benefit_data.get('code'),
+                date_due=benefit_data.get('date_due'),
+                amount=benefit_data.get('amount'),
+                type=benefit_data.get('type'),
+                status=benefit_data.get('status'),
+                date_valid_from=benefit_data.get('date_valid_from'),
+                date_valid_to=benefit_data.get('date_valid_to'),
+                # Audit fields
+                user_created=user,
+                user_updated=user,
+                date_created=now,
+                date_updated=now,
+                version=1,
+            )
+            benefit_instances.append(benefit)
+
+            # Build BenefitAttachment (links bill to benefit)
+            attachment = BenefitAttachment(
+                id=uuid_module.uuid4(),
+                benefit_id=benefit_uuid,
+                bill_id=bill_uuid,
+                # Audit fields
+                user_created=user,
+                user_updated=user,
+                date_created=now,
+                date_updated=now,
+                version=1,
+            )
+            attachment_instances.append(attachment)
+
+            # Build PayrollBenefitConsumption (links benefit to payroll)
+            if payroll_id:
+                pbc = PayrollBenefitConsumption(
+                    id=uuid_module.uuid4(),
+                    payroll_id=payroll_id,
+                    benefit_id=benefit_uuid,
+                    # Audit fields
+                    user_created=user,
+                    user_updated=user,
+                    date_created=now,
+                    date_updated=now,
+                    version=1,
+                )
+                payroll_benefit_instances.append(pbc)
+
+        # Bulk insert in dependency order: parents first, then children
+        BillService.bulk_create_bills(bill_instances)
+        BillService.bulk_create_bill_items(bill_item_instances)
+
+        benefit_service = BenefitConsumptionService(user)
+        benefit_service.bulk_create(benefit_instances)
+        benefit_service.bulk_create_attachments(attachment_instances)
+
+        if payroll_benefit_instances:
+            payroll_service = PayrollService(user=user)
+            payroll_service.bulk_attach_benefits(payroll_benefit_instances)
+
+    @staticmethod
+    def _sum_line_items(line_items, field):
+        return sum(
+            decimal.Decimal(str(item.get(field, 0)))
+            for item in line_items
+        )
+
+    @staticmethod
+    def _sum_line_items_discount(line_items):
+        return sum(
+            decimal.Decimal(str(item.get('discount', 0)))
+            for item in line_items
+        )
 
     @classmethod
     def _convert_entity_to_bill(

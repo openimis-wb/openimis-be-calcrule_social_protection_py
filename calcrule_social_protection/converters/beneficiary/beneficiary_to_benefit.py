@@ -3,6 +3,5 @@ from calcrule_social_protection.converters.builder import BuilderToBenefitConver
 
 class BeneficiaryToBenefitConverter(BuilderToBenefitConverter):
 
-    @classmethod
-    def _build_individual(cls, benefit, entity):
+    def _build_individual(self, benefit, entity):
         benefit["individual_id"] = f"{entity.individual.id}"

@@ -2,6 +2,7 @@ from django.contrib.contenttypes.models import ContentType
 
 
 class BuilderToBillItemConverter:
+    _line_type_id_cache = None
 
     @classmethod
     def to_bill_item_obj(cls, payment_plan, entity, amount):
@@ -16,7 +17,9 @@ class BuilderToBillItemConverter:
     @classmethod
     def _build_line_fk(cls, bill_line_item, entity):
         bill_line_item["line_id"] = f"{entity.id}"
-        bill_line_item['line_type_id'] = f"{ContentType.objects.get_for_model(entity).id}"
+        if cls._line_type_id_cache is None:
+            cls._line_type_id_cache = ContentType.objects.get_for_model(entity).id
+        bill_line_item['line_type_id'] = f"{cls._line_type_id_cache}"
 
     @classmethod
     def _build_quantity(cls, bill_line_item):

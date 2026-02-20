@@ -6,29 +6,39 @@ from payroll.models import BenefitConsumptionStatus
 class BuilderToBenefitConverter:
     TYPE = None
 
-    @classmethod
-    def to_benefit_obj(cls, entity, amount, payment_plan, payment_cycle):
+    def __init__(self):
+        self._code_cache = []
+        self._cache_index = 0
+
+    def _pregenerate_codes(self, count):
+        self._code_cache = CodeGenerator.generate_unique_codes_batch(
+            'payroll', 'BenefitConsumption', 'code',
+            CalcruleSocialProtectionConfig.code_length, count
+        )
+        self._cache_index = 0
+
+    def to_benefit_obj(self, entity, amount, payment_plan, payment_cycle):
         benefit = {}
-        cls._build_individual(benefit, entity)
-        cls._build_code(benefit)
-        cls._build_amount(benefit, amount)
-        cls._build_date_dates(benefit, payment_plan, payment_cycle)
-        cls._build_type(benefit)
-        cls._build_status(benefit)
+        self._build_individual(benefit, entity)
+        self._build_code(benefit)
+        self._build_amount(benefit, amount)
+        self._build_date_dates(benefit, payment_plan, payment_cycle)
+        self._build_type(benefit)
+        self._build_status(benefit)
         return benefit
 
-    @classmethod
-    def _build_individual(cls, benefit, entity):
+    def _build_individual(self, benefit, entity):
         pass
 
-    @classmethod
-    def _build_code(cls, benefit):
-        code = CodeGenerator.generate_unique_code(
-            'payroll',
-            'BenefitConsumption',
-            'code',
-            CalcruleSocialProtectionConfig.code_length
-        )
+    def _build_code(self, benefit):
+        if self._cache_index < len(self._code_cache):
+            code = self._code_cache[self._cache_index]
+            self._cache_index += 1
+        else:
+            code = CodeGenerator.generate_unique_code(
+                'payroll', 'BenefitConsumption', 'code',
+                CalcruleSocialProtectionConfig.code_length
+            )
         benefit["code"] = code
 
     @classmethod
@@ -38,7 +48,7 @@ class BuilderToBenefitConverter:
     @classmethod
     def _build_date_dates(cls, benefit, payment_plan, payment_cycle):
         benefit["date_due"] = f"{payment_cycle.end_date}"
-        benefit["date_valid_from"] = f"{ payment_plan.benefit_plan.date_valid_from}"
+        benefit["date_valid_from"] = f"{payment_plan.benefit_plan.date_valid_from}"
         benefit["date_valid_to"] = f"{payment_plan.benefit_plan.date_valid_to}"
 
     @classmethod
