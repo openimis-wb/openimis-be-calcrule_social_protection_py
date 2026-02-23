@@ -70,7 +70,7 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
         batch_bill_results = []
         batch_benefit_results = []
 
-        for beneficiary in beneficiaries:
+        for i, beneficiary in enumerate(beneficiaries):
             calculated_payment, is_exceed = cls._calculate_payment_from_precomputed(
                 beneficiary, advanced_filters_criteria, criteria_match_sets, payment, limit
             )
@@ -101,6 +101,14 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
                 )
                 batch_bill_results.append(convert_results)
                 batch_benefit_results.append(convert_results_benefit)
+
+            if beneficiary_count > 0 and (i + 1) % max(1, beneficiary_count // 10) == 0:
+                if payroll:
+                    if payroll.json_ext is None:
+                        payroll.json_ext = {}
+                    payroll.json_ext['progress'] = int((i + 1) * 100 / beneficiary_count)
+                    payroll.save()
+
 
         # Bulk create all non-exceed-limit items
         if batch_bill_results:
@@ -151,13 +159,26 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
         for criterion in advanced_filters_criteria:
             condition = criterion['custom_filter_condition']
             condition_key, condition_value = condition.split("=")
-            json_key, lookup = condition_key.split('__')[0:2]
-            parsed_condition_value = convert_to_python_value(condition_value)
+            # Match the logic in BenefitPlanCustomFilterWizard.apply_filter_to_queryset
+            # where the last part is treated as the value type hint
+            if '__' in condition_key:
+                field, value_type = condition_key.rsplit('__', 1)
+                parsed_condition_value = convert_to_python_value(condition_value)
+                
+                # If the value_type is one of our known types, we strip it
+                if value_type in ['integer', 'string', 'numeric', 'boolean', 'date']:
+                    lookup_path = field
+                else:
+                    # Otherwise it might be a standard Django lookup like __exact, __gte
+                    lookup_path = condition_key
+            else:
+                lookup_path = condition_key
+                parsed_condition_value = convert_to_python_value(condition_value)
 
             matching_ids = set(
                 cls.BENEFICIARY_OBJECT.objects.filter(
                     id__in=[b.id for b in beneficiaries],
-                    **{f'json_ext__{json_key}__{lookup}': parsed_condition_value}
+                    **{f'json_ext__{lookup_path}': parsed_condition_value}
                 ).values_list('id', flat=True)
             )
             criteria_match_sets.append(matching_ids)
@@ -195,11 +216,23 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
     @classmethod
     def _does_beneficiary_meet_condition(cls, beneficiary, condition):
         condition_key, condition_value = condition.split("=")
-        json_key, lookup = condition_key.split('__')[0:2]
-        parsed_condition_value = convert_to_python_value(condition_value)
+        if '__' in condition_key:
+            field, value_type = condition_key.rsplit('__', 1)
+            parsed_condition_value = convert_to_python_value(condition_value)
+            if value_type in ['integer', 'string', 'numeric', 'boolean', 'date']:
+                json_key = field.split('__')[0]
+                lookup_path = field
+            else:
+                json_key = condition_key.split('__')[0]
+                lookup_path = condition_key
+        else:
+            json_key = condition_key
+            lookup_path = condition_key
+            parsed_condition_value = convert_to_python_value(condition_value)
+
         if json_key in beneficiary.json_ext:
             return cls.BENEFICIARY_OBJECT.objects.filter(
-                        id=beneficiary.id, **{f'json_ext__{json_key}__{lookup}': parsed_condition_value}
+                        id=beneficiary.id, **{f'json_ext__{lookup_path}': parsed_condition_value}
                     ).exists()
         return False
 
