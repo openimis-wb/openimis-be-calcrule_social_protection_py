@@ -31,12 +31,10 @@ class CodeGenerator:
         return generated_codes
 
     @classmethod
-    def generate_unique_code(cls, app_label, model_name, code_field_name, length):
-        model = apps.get_model(app_label=app_label, model_name=model_name)
-        code = cls._random_code(length)
-        while model.objects.filter(**{code_field_name: code}).exists():
-            code = cls._random_code(length)
-        return code
+    def generate_unique_code(cls, app_label: str, model_name: str,
+                             code_field_name: str, length: int) -> str:
+        codes = cls.generate_unique_codes_batch(app_label, model_name, code_field_name, length, 1)
+        return codes[0]
 
     @classmethod
     def _random_code(cls, length):

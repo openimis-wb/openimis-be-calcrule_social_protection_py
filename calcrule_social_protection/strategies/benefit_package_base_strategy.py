@@ -107,7 +107,7 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
                     if payroll.json_ext is None:
                         payroll.json_ext = {}
                     payroll.json_ext['progress'] = int((i + 1) * 100 / beneficiary_count)
-                    payroll.save()
+                    payroll.save(username=user.login_name)
 
 
         # Bulk create all non-exceed-limit items
