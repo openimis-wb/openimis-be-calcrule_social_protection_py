@@ -1,31 +1,19 @@
 from django.contrib.contenttypes.models import ContentType
 from invoice.apps import InvoiceConfig
 from invoice.models import Bill
-from calcrule_social_protection.utils import CodeGenerator
-from calcrule_social_protection.apps import CalcruleSocialProtectionConfig
 
 
 class BuilderToBillConverter:
     TYPE = None
 
     def __init__(self):
-        self._code_cache = []
-        self._cache_index = 0
         self._subject_type_id = None
         self._thirdparty_type_id = None
-
-    def _pregenerate_codes(self, count):
-        self._code_cache = CodeGenerator.generate_unique_codes_batch(
-            'invoice', 'Bill', 'code',
-            CalcruleSocialProtectionConfig.code_length, count
-        )
-        self._cache_index = 0
 
     def to_bill_obj(self, payment_plan, entity, amount, end_date, payment_cycle):
         bill = {}
         self._build_subject(bill, entity)
         self._build_thirdparty(bill, payment_plan)
-        self._build_code(bill)
         self._build_price(bill, amount)
         self._build_terms(bill, payment_plan, entity, end_date)
         self._build_date_dates(bill, payment_plan, payment_cycle)
@@ -44,17 +32,6 @@ class BuilderToBillConverter:
         if self._thirdparty_type_id is None:
             self._thirdparty_type_id = ContentType.objects.get_for_model(payment_plan).id
         bill['thirdparty_type_id'] = f"{self._thirdparty_type_id}"
-
-    def _build_code(self, bill):
-        if self._cache_index < len(self._code_cache):
-            code = self._code_cache[self._cache_index]
-            self._cache_index += 1
-        else:
-            code = CodeGenerator.generate_unique_code(
-                'invoice', 'Bill', 'code',
-                CalcruleSocialProtectionConfig.code_length
-            )
-        bill["code"] = code
 
     @classmethod
     def _build_price(cls, bill, amount):

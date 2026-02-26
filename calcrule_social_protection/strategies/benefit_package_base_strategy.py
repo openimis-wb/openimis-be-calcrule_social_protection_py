@@ -241,8 +241,6 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
         if converter_cls is None:
             return None
         instance = converter_cls()
-        if payroll:
-            instance._pregenerate_codes(count)
         return instance
 
     @classmethod

@@ -14,7 +14,6 @@ from contribution_plan.models import PaymentPlan
 from payment_cycle.models import PaymentCycle
 from calcrule_social_protection.strategies.benefit_package_individual_strategy import IndividualBenefitPackageStrategy
 from calcrule_social_protection.converters.builder.builder_to_bill import BuilderToBillConverter
-from calcrule_social_protection.utils import CodeGenerator
 
 class BenefitPackageStrategyTests(TestCase):
     @classmethod
@@ -83,29 +82,8 @@ class BenefitPackageStrategyTests(TestCase):
         self.assertIn(self.b2.id, match_sets[1])
         self.assertNotIn(self.b1.id, match_sets[1])
 
-    def test_pregenerate_codes_batch(self):
-        """Verify that CodeGenerator can reserve multiple unique codes at once."""
-        count = 10
-        codes = CodeGenerator.generate_unique_codes_batch(
-            'invoice', 'Bill', 'code', 8, count
-        )
-        self.assertEqual(len(codes), count)
-        self.assertEqual(len(set(codes)), count, "Generated codes are not unique")
-        # Verify they are not in DB (they shouldn't be yet)
-        self.assertEqual(Bill.objects.filter(code__in=codes).count(), 0)
 
-    def test_builder_to_bill_converter_cache(self):
-        """Verify that the converter uses pre-generated codes from its cache."""
-        converter = BuilderToBillConverter()
-        converter._pregenerate_codes(count=2)
-        
-        bill1 = converter.to_bill_obj(self.payment_plan, self.b1, 100, "2020-01-31", self.payment_cycle)
-        self.assertEqual(bill1['code'], converter._code_cache[0])
-        self.assertEqual(converter._cache_index, 1)
-        
-        bill2 = converter.to_bill_obj(self.payment_plan, self.b2, 200, "2020-01-31", self.payment_cycle)
-        self.assertEqual(bill2['code'], converter._code_cache[1])
-        self.assertEqual(converter._cache_index, 2)
+
 
     def test_create_and_save_business_entities_batch(self):
         """Verify that the batch creation method persists all related entities correctly."""
