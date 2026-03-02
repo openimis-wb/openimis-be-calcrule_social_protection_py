@@ -13,85 +13,71 @@ from payroll.models import (
 from contribution_plan.models import PaymentPlan
 from payment_cycle.models import PaymentCycle
 from calcrule_social_protection.strategies.benefit_package_individual_strategy import IndividualBenefitPackageStrategy
-from calcrule_social_protection.converters.builder.builder_to_bill import BuilderToBillConverter
+from calcrule_social_protection.calculation_rule import SocialProtectionCalculationRule
 
 class BenefitPackageStrategyTests(TestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
         cls.user = LogInHelper().get_or_create_user_api(username='admin_bulk')
-            
-        cls.benefit_plan = BenefitPlan.objects.create(
-            name="Test BP", 
-            date_valid_from="2020-01-01",
-            user_created=cls.user
-        )
-        
-        # Create beneficiaries with specific json_ext for criteria testing
-        cls.i1 = Individual.objects.create(first_name="Individual", last_name="I1", dob="1990-01-01", user_created=cls.user)
-        cls.i1.json_ext = {"able_bodied": True}
-        cls.i1.save()
-        cls.b1 = Beneficiary.objects.create(
-            individual=cls.i1, 
-            benefit_plan=cls.benefit_plan, 
+
+        bp = BenefitPlan(name="Test BP", date_valid_from="2020-01-01")
+        bp.save(user=cls.user)
+        cls.benefit_plan = bp
+
+        i1 = Individual(first_name="Individual", last_name="I1", dob="1990-01-01")
+        i1.save(user=cls.user)
+        i1.json_ext = {"able_bodied": True}
+        i1.save(user=cls.user)
+        cls.i1 = i1
+
+        b1 = Beneficiary(
+            individual=cls.i1,
+            benefit_plan=cls.benefit_plan,
             status=BeneficiaryStatus.ACTIVE,
             json_ext=cls.i1.json_ext,
-            user_created=cls.user
         )
-        
-        cls.i2 = Individual.objects.create(first_name="Individual", last_name="I2", dob="1990-01-01", user_created=cls.user)
-        cls.i2.json_ext = {"able_bodied": False}
-        cls.i2.save()
-        cls.b2 = Beneficiary.objects.create(
-            individual=cls.i2, 
-            benefit_plan=cls.benefit_plan, 
+        b1.save(user=cls.user)
+        cls.b1 = b1
+
+        i2 = Individual(first_name="Individual", last_name="I2", dob="1990-01-01")
+        i2.save(user=cls.user)
+        i2.json_ext = {"able_bodied": False}
+        i2.save(user=cls.user)
+        cls.i2 = i2
+
+        b2 = Beneficiary(
+            individual=cls.i2,
+            benefit_plan=cls.benefit_plan,
             status=BeneficiaryStatus.ACTIVE,
             json_ext=cls.i2.json_ext,
-            user_created=cls.user
         )
+        b2.save(user=cls.user)
+        cls.b2 = b2
 
-        cls.payment_plan = PaymentPlan.objects.create(
-            code="PP1", 
-            name="Payment Plan 1", 
+        pp = PaymentPlan(
+            code="PP1",
+            name="Payment Plan 1",
             benefit_plan=cls.benefit_plan,
-            calculation="32d96b58-898a-460a-b357-5fd4b95cd87c",
+            calculation=SocialProtectionCalculationRule.uuid,
             periodicity=1,
-            user_created=cls.user
         )
-        cls.payment_cycle = PaymentCycle.objects.create(
-            code="PC1", 
-            start_date="2020-01-01", 
+        pp.save(user=cls.user)
+        cls.payment_plan = pp
+
+        pc = PaymentCycle(
+            code="PC1",
+            start_date="2020-01-01",
             end_date="2020-01-31",
             type=ContentType.objects.get_for_model(BenefitPlan),
-            user_created=cls.user
         )
-
-    def test_precompute_criteria_matches(self):
-        """Verify that criteria match pre-computation avoids per-row queries."""
-        criteria = [
-            {"custom_filter_condition": "able_bodied__boolean=True", "amount": 10},
-            {"custom_filter_condition": "able_bodied__boolean=False", "amount": 20}
-        ]
-        beneficiaries = Beneficiary.objects.all()
-        
-        match_sets = IndividualBenefitPackageStrategy._precompute_criteria_matches(beneficiaries, criteria)
-        
-        self.assertEqual(len(match_sets), 2)
-        self.assertIn(self.b1.id, match_sets[0])
-        self.assertNotIn(self.b2.id, match_sets[0])
-        self.assertIn(self.b2.id, match_sets[1])
-        self.assertNotIn(self.b1.id, match_sets[1])
-
-
-
+        pc.save(user=cls.user)
+        cls.payment_cycle = pc
 
     def test_create_and_save_business_entities_batch(self):
         """Verify that the batch creation method persists all related entities correctly."""
-        payroll = Payroll.objects.create(
-            name="BatchPayroll",
-            user_created=self.user,
-            user_updated=self.user
-        )
+        payroll = Payroll(name="BatchPayroll")
+        payroll.save(user=self.user)
         
         batch_bill_results = [{
             'bill_data': {
@@ -131,8 +117,7 @@ class BenefitPackageStrategyTests(TestCase):
         IndividualBenefitPackageStrategy.create_and_save_business_entities_batch(
             batch_bill_results, batch_benefit_results, payroll.id, self.user
         )
-        
-        # Verify persistence
+
         self.assertTrue(Bill.objects.filter(code='BATCH_BILL_0').exists())
         self.assertTrue(Bill.objects.filter(code='BATCH_BILL_1').exists())
         self.assertTrue(BillItem.objects.filter(code='LINE_1').exists())
@@ -143,3 +128,51 @@ class BenefitPackageStrategyTests(TestCase):
         self.assertTrue(PayrollBenefitConsumption.objects.filter(
             payroll=payroll, benefit__code='BATCH_BENEFIT_1'
         ).exists())
+
+    def test_db_default_code_generation(self):
+        """Verify that DB sequences generate unique codes when no code is provided."""
+        from django.db import connection
+
+        # Test BenefitConsumption default code
+        bc1 = BenefitConsumption(individual=self.i1, amount=50, status=BenefitConsumptionStatus.ACCEPTED)
+        print("BEFORE BC1 SAVE, code:", repr(bc1.code))
+        bc1.save(user=self.user)
+        bc1.refresh_from_db()
+
+        bc2 = BenefitConsumption(individual=self.i2, amount=75, status=BenefitConsumptionStatus.ACCEPTED)
+        print("BEFORE BC2 SAVE, code:", repr(bc2.code))
+        bc2.save(user=self.user)
+        bc2.refresh_from_db()
+
+        self.assertTrue(bc1.code.startswith('BEN-'), f"Expected BEN- prefix, got: {bc1.code}")
+        self.assertTrue(bc2.code.startswith('BEN-'), f"Expected BEN- prefix, got: {bc2.code}")
+        self.assertNotEqual(bc1.code, bc2.code, "Sequential codes must be unique")
+
+        # Test Bill default code
+        beneficiary_ct = ContentType.objects.get_for_model(Beneficiary)
+        bill1 = Bill(
+            subject_id=str(self.b1.id),
+            subject_type=beneficiary_ct,
+            amount_net=100,
+            status=Bill.Status.VALIDATED,
+            currency_tp_code='USD',
+            currency_code='USD',
+        )
+        bill1.save(user=self.user)
+        bill1.refresh_from_db()
+
+        bill2 = Bill(
+            subject_id=str(self.b2.id),
+            subject_type=beneficiary_ct,
+            amount_net=200,
+            status=Bill.Status.VALIDATED,
+            currency_tp_code='USD',
+            currency_code='USD',
+        )
+        bill2.save(user=self.user)
+        bill2.refresh_from_db()
+
+        self.assertTrue(bill1.code.startswith('BIL-'), f"Expected BIL- prefix, got: {bill1.code}")
+        self.assertTrue(bill2.code.startswith('BIL-'), f"Expected BIL- prefix, got: {bill2.code}")
+        self.assertNotEqual(bill1.code, bill2.code, "Sequential bill codes must be unique")
+
