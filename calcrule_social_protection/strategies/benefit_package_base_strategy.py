@@ -61,12 +61,10 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
         converter_benefit = cls._init_converter(cls.CONVERTER_BENEFIT, beneficiary_count, payroll)
         cls._prefetch_converter_data(converter_benefit, beneficiaries)
 
-        # Pre-compute which beneficiaries match each advanced criterion (M queries instead of M*N)
         criteria_match_sets = cls._precompute_criteria_matches(
             beneficiaries, advanced_filters_criteria
         )
 
-        # Collect results for batch creation
         batch_bill_results = []
         batch_benefit_results = []
 
@@ -87,22 +85,22 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
             }
 
             if is_exceed:
-                # Exceed-limit items are still handled individually via task creation
-                # Set class flag for the convert() method which reads it
                 cls.is_exceed_limit = True
-                calculation.run_convert(
-                    payment_plan,
-                    **additional_params
-                )
+                try:
+                    calculation.run_convert(
+                        payment_plan,
+                        **additional_params
+                    )
+                finally:
+                    cls.is_exceed_limit = False
             else:
-                # Collect convert results for batch creation
                 convert_results, convert_results_benefit = cls._collect_convert_results(
                     calculation, payment_plan, **additional_params
                 )
                 batch_bill_results.append(convert_results)
                 batch_benefit_results.append(convert_results_benefit)
 
-            if beneficiary_count > 0 and (i + 1) % max(1, beneficiary_count // 10) == 0:
+            if beneficiary_count >= 10 and (i + 1) % (beneficiary_count // 10) == 0:
                 if payroll:
                     if payroll.json_ext is None:
                         payroll.json_ext = {}
@@ -110,7 +108,6 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
                     payroll.save(username=user.login_name)
 
 
-        # Bulk create all non-exceed-limit items
         if batch_bill_results:
             cls.create_and_save_business_entities_batch(
                 batch_bill_results,
@@ -123,10 +120,8 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
 
     @classmethod
     def _collect_convert_results(cls, calculation, payment_plan, **kwargs):
-        """Collect convert results without saving to DB. Used for batch creation.
-
-        Subclasses should override this to resolve entity from their specific
-        beneficiary type key (e.g., 'beneficiary' or 'group') and set converter_item.
+        """Collect convert results for batch creation. Subclasses override to resolve
+        entity from their beneficiary type key and set converter_item.
         """
         entity = kwargs.get('entity', None)
         amount = kwargs.get('amount', None)
@@ -146,38 +141,20 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
 
     @classmethod
     def _precompute_criteria_matches(cls, beneficiaries, advanced_filters_criteria):
-        """Pre-compute which beneficiaries match each advanced criterion.
-
-        Returns a list of sets, one per criterion, containing the IDs of
-        beneficiaries that match that criterion. This replaces M*N individual
-        exists() queries with M batch queries.
+        """Return a list of ID sets, one per criterion, of matching beneficiaries.
+        Replaces M*N per-row exists() queries with M batch queries.
         """
         if not advanced_filters_criteria:
             return []
 
         criteria_match_sets = []
+        beneficiary_ids = [b.id for b in beneficiaries]
         for criterion in advanced_filters_criteria:
             condition = criterion['custom_filter_condition']
-            condition_key, condition_value = condition.split("=")
-            # Match the logic in BenefitPlanCustomFilterWizard.apply_filter_to_queryset
-            # where the last part is treated as the value type hint
-            if '__' in condition_key:
-                field, value_type = condition_key.rsplit('__', 1)
-                parsed_condition_value = convert_to_python_value(condition_value)
-                
-                # If the value_type is one of our known types, we strip it
-                if value_type in ['integer', 'string', 'numeric', 'boolean', 'date']:
-                    lookup_path = field
-                else:
-                    # Otherwise it might be a standard Django lookup like __exact, __gte
-                    lookup_path = condition_key
-            else:
-                lookup_path = condition_key
-                parsed_condition_value = convert_to_python_value(condition_value)
-
+            lookup_path, parsed_condition_value = cls._parse_condition(condition)
             matching_ids = set(
                 cls.BENEFICIARY_OBJECT.objects.filter(
-                    id__in=[b.id for b in beneficiaries],
+                    id__in=beneficiary_ids,
                     **{f'json_ext__{lookup_path}': parsed_condition_value}
                 ).values_list('id', flat=True)
             )
@@ -189,10 +166,6 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
     def _calculate_payment_from_precomputed(
             cls, beneficiary, advanced_filters_criteria, criteria_match_sets, payment, limit
     ):
-        """Calculate payment using pre-computed criteria match sets instead of per-row queries.
-
-        Returns (calculated_payment, is_exceed_limit) tuple.
-        """
         for i, criterion in enumerate(advanced_filters_criteria):
             calculated_amount = float(criterion['amount'])
             if beneficiary.id in criteria_match_sets[i]:
@@ -201,40 +174,28 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
         return payment, is_exceed
 
     @classmethod
-    def _calculate_payment(cls, beneficiary, advanced_filters_criteria, payment, limit):
-        for criterion in advanced_filters_criteria:
-            condition = criterion['custom_filter_condition']
-            calculated_amount = float(criterion['amount'])
-            if cls._does_beneficiary_meet_condition(beneficiary, condition):
-                payment += calculated_amount
-        if limit:
-            cls.is_exceed_limit = True if payment > limit else False
-        else:
-            cls.is_exceed_limit = False
-        return payment
-
-    @classmethod
     def _does_beneficiary_meet_condition(cls, beneficiary, condition):
-        condition_key, condition_value = condition.split("=")
-        if '__' in condition_key:
-            field, value_type = condition_key.rsplit('__', 1)
-            parsed_condition_value = convert_to_python_value(condition_value)
-            if value_type in ['integer', 'string', 'numeric', 'boolean', 'date']:
-                json_key = field.split('__')[0]
-                lookup_path = field
-            else:
-                json_key = condition_key.split('__')[0]
-                lookup_path = condition_key
-        else:
-            json_key = condition_key
-            lookup_path = condition_key
-            parsed_condition_value = convert_to_python_value(condition_value)
-
+        lookup_path, parsed_condition_value = cls._parse_condition(condition)
+        json_key = lookup_path.split('__')[0]
         if json_key in beneficiary.json_ext:
             return cls.BENEFICIARY_OBJECT.objects.filter(
-                        id=beneficiary.id, **{f'json_ext__{lookup_path}': parsed_condition_value}
-                    ).exists()
+                id=beneficiary.id, **{f'json_ext__{lookup_path}': parsed_condition_value}
+            ).exists()
         return False
+
+    @staticmethod
+    def _parse_condition(condition):
+        """Parse 'field__type=value' into (lookup_path, parsed_value).
+        Type-hint suffixes (integer, string, numeric, boolean, date) are stripped.
+        """
+        condition_key, condition_value = condition.split("=", 1)
+        parsed_value = convert_to_python_value(condition_value)
+        if '__' in condition_key:
+            field, value_type = condition_key.rsplit('__', 1)
+            lookup_path = field if value_type in ('integer', 'string', 'numeric', 'boolean', 'date') else condition_key
+        else:
+            lookup_path = condition_key
+        return lookup_path, parsed_value
 
     @classmethod
     def _init_converter(cls, converter_cls, count, payroll):
@@ -245,9 +206,7 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
 
     @classmethod
     def _prefetch_converter_data(cls, converter_benefit, beneficiaries):
-        """Hook for subclasses to prefetch data needed by converters.
-        Override in group strategy to prefetch recipients.
-        """
+        """Hook for subclasses to prefetch data needed by converters."""
         pass
 
     @classmethod
@@ -308,13 +267,8 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
     def create_and_save_business_entities_batch(
             cls, batch_bill_results, batch_benefit_results, payroll_id, user
     ):
-        """Bulk create all Bills, BillItems, BenefitConsumptions, BenefitAttachments,
-        and PayrollBenefitConsumptions in batch instead of one-at-a-time.
-
-        Each entry in batch_bill_results corresponds to one beneficiary's bill data:
-            {'bill_data': dict, 'bill_data_line': [dict, ...], 'user': User}
-        Each entry in batch_benefit_results corresponds to one beneficiary's benefit data:
-            {'benefit_data': dict}
+        """Bulk create Bills, BillItems, BenefitConsumptions, BenefitAttachments,
+        and PayrollBenefitConsumptions in a single transaction.
         """
         now = py_datetime.now()
 
@@ -331,11 +285,16 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
             bill_line_items = bill_result['bill_data_line']
             benefit_data = benefit_result['benefit_data']
 
-            # Pre-assign UUIDs for FK linking
+            if not benefit_data.get('individual_id'):
+                logger.warning(
+                    f"Skipping batch entry for payroll {payroll_id}: "
+                    f"no individual_id in benefit_data (bill code: {bill_data.get('code', 'unknown')})"
+                )
+                continue
+
             bill_uuid = uuid_module.uuid4()
             benefit_uuid = uuid_module.uuid4()
 
-            # Build Bill instance
             bill = Bill(
                 id=bill_uuid,
                 subject_type_id=bill_data.get('subject_type_id'),
@@ -354,11 +313,9 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
                 status=bill_data.get('status', Bill.Status.VALIDATED),
                 terms=bill_data.get('terms'),
                 note=bill_data.get('note'),
-                # Compute totals from line items
                 amount_net=cls._sum_line_items(bill_line_items, 'amount_total'),
                 amount_total=cls._sum_line_items(bill_line_items, 'amount_total'),
-                amount_discount=cls._sum_line_items_discount(bill_line_items),
-                # Audit fields (bypassing HistoryModel.save())
+                amount_discount=cls._sum_line_items(bill_line_items, 'discount'),
                 user_created=user,
                 user_updated=user,
                 date_created=now,
@@ -367,7 +324,6 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
             )
             bill_instances.append(bill)
 
-            # Build BillItem instances
             for line_item_data in bill_line_items:
                 bill_item = BillItem(
                     id=uuid_module.uuid4(),
@@ -383,7 +339,6 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
                     deduction=line_item_data.get('deduction', 0),
                     date_valid_from=line_item_data.get('date_valid_from'),
                     date_valid_to=line_item_data.get('date_valid_to'),
-                    # Audit fields
                     user_created=user,
                     user_updated=user,
                     date_created=now,
@@ -392,7 +347,6 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
                 )
                 bill_item_instances.append(bill_item)
 
-            # Build BenefitConsumption instance
             benefit = BenefitConsumption(
                 id=benefit_uuid,
                 individual_id=benefit_data.get('individual_id'),
@@ -403,7 +357,6 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
                 status=benefit_data.get('status'),
                 date_valid_from=benefit_data.get('date_valid_from'),
                 date_valid_to=benefit_data.get('date_valid_to'),
-                # Audit fields
                 user_created=user,
                 user_updated=user,
                 date_created=now,
@@ -412,12 +365,10 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
             )
             benefit_instances.append(benefit)
 
-            # Build BenefitAttachment (links bill to benefit)
             attachment = BenefitAttachment(
                 id=uuid_module.uuid4(),
                 benefit_id=benefit_uuid,
                 bill_id=bill_uuid,
-                # Audit fields
                 user_created=user,
                 user_updated=user,
                 date_created=now,
@@ -426,13 +377,11 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
             )
             attachment_instances.append(attachment)
 
-            # Build PayrollBenefitConsumption (links benefit to payroll)
             if payroll_id:
                 pbc = PayrollBenefitConsumption(
                     id=uuid_module.uuid4(),
                     payroll_id=payroll_id,
                     benefit_id=benefit_uuid,
-                    # Audit fields
                     user_created=user,
                     user_updated=user,
                     date_created=now,
@@ -441,17 +390,56 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
                 )
                 payroll_benefit_instances.append(pbc)
 
-        # Bulk insert in dependency order: parents first, then children
-        BillService.bulk_create_bills(bill_instances)
-        BillService.bulk_create_bill_items(bill_item_instances)
+        batch_size = len(bill_instances)
+        logger.info(
+            f"Bulk creating {batch_size} entities for payroll {payroll_id}: "
+            f"{len(bill_instances)} bills, {len(bill_item_instances)} bill items, "
+            f"{len(benefit_instances)} benefits, {len(attachment_instances)} attachments, "
+            f"{len(payroll_benefit_instances)} payroll-benefit links"
+        )
 
-        benefit_service = BenefitConsumptionService(user)
-        benefit_service.bulk_create(benefit_instances)
-        benefit_service.bulk_create_attachments(attachment_instances)
+        try:
+            BillService.bulk_create_bills(bill_instances)
+            BillService.bulk_create_bill_items(bill_item_instances)
 
-        if payroll_benefit_instances:
-            payroll_service = PayrollService(user=user)
-            payroll_service.bulk_attach_benefits(payroll_benefit_instances)
+            benefit_service = BenefitConsumptionService(user)
+            benefit_service.bulk_create(benefit_instances)
+            benefit_service.bulk_create_attachments(attachment_instances)
+
+            if payroll_benefit_instances:
+                payroll_service = PayrollService(user=user)
+                payroll_service.bulk_attach_benefits(payroll_benefit_instances)
+
+            # Re-fetch to get trigger-assigned codes, then write history.
+            bill_ids = [b.id for b in bill_instances]
+            bill_item_ids = [bi.id for bi in bill_item_instances]
+            benefit_ids = [b.id for b in benefit_instances]
+            attachment_ids = [a.id for a in attachment_instances]
+
+            persisted_bills = list(Bill.objects.filter(id__in=bill_ids))
+            persisted_bill_items = list(BillItem.objects.filter(id__in=bill_item_ids))
+            persisted_benefits = list(BenefitConsumption.objects.filter(id__in=benefit_ids))
+            persisted_attachments = list(BenefitAttachment.objects.filter(id__in=attachment_ids))
+
+            cls._bulk_write_creation_history(persisted_bills, Bill, user, now)
+            cls._bulk_write_creation_history(persisted_bill_items, BillItem, user, now)
+            cls._bulk_write_creation_history(persisted_benefits, BenefitConsumption, user, now)
+            cls._bulk_write_creation_history(persisted_attachments, BenefitAttachment, user, now)
+
+            if payroll_benefit_instances:
+                pbc_ids = [p.id for p in payroll_benefit_instances]
+                persisted_pbcs = list(PayrollBenefitConsumption.objects.filter(id__in=pbc_ids))
+                cls._bulk_write_creation_history(persisted_pbcs, PayrollBenefitConsumption, user, now)
+
+        except Exception:
+            logger.error(
+                f"Failed to bulk create entities for payroll {payroll_id} "
+                f"(batch size: {batch_size})",
+                exc_info=True,
+            )
+            raise
+
+        logger.info(f"Bulk creation complete for payroll {payroll_id} ({batch_size} items)")
 
     @staticmethod
     def _sum_line_items(line_items, field):
@@ -461,11 +449,25 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
         )
 
     @staticmethod
-    def _sum_line_items_discount(line_items):
-        return sum(
-            decimal.Decimal(str(item.get('discount', 0)))
-            for item in line_items
-        )
+    def _bulk_write_creation_history(instances, model_class, user, history_date):
+        """Write simple-history creation records for bulk_create'd entities."""
+        if not instances:
+            return
+
+        HistoricalModel = model_class.history.model
+        concrete_field_names = [field.attname for field in model_class._meta.concrete_fields]
+
+        historical_records = [
+            HistoricalModel(
+                history_type='+',
+                history_date=history_date,
+                history_user=user,
+                history_change_reason=None,
+                **{name: getattr(instance, name) for name in concrete_field_names}
+            )
+            for instance in instances
+        ]
+        HistoricalModel.objects.bulk_create(historical_records, batch_size=500)
 
     @classmethod
     def _convert_entity_to_bill(
@@ -497,7 +499,7 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
     @transaction.atomic
     @register_service_signal('calcrule_social_protection.create_task')
     def create_task_after_exceeding_limit(cls, convert_results, convert_results_benefit, payroll):
-        business_status = {"code": convert_results['bill_data']['code']}
+        business_status = {"code": convert_results['bill_data'].get('code', '')}
         user = convert_results.pop('user')
         convert_results['benefit'] = convert_results_benefit
         convert_results['payroll_id'] = f"{payroll.id}"

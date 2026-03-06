@@ -131,16 +131,11 @@ class BenefitPackageStrategyTests(TestCase):
 
     def test_db_default_code_generation(self):
         """Verify that DB sequences generate unique codes when no code is provided."""
-        from django.db import connection
-
-        # Test BenefitConsumption default code
         bc1 = BenefitConsumption(individual=self.i1, amount=50, status=BenefitConsumptionStatus.ACCEPTED)
-        print("BEFORE BC1 SAVE, code:", repr(bc1.code))
         bc1.save(user=self.user)
         bc1.refresh_from_db()
 
         bc2 = BenefitConsumption(individual=self.i2, amount=75, status=BenefitConsumptionStatus.ACCEPTED)
-        print("BEFORE BC2 SAVE, code:", repr(bc2.code))
         bc2.save(user=self.user)
         bc2.refresh_from_db()
 
@@ -148,7 +143,6 @@ class BenefitPackageStrategyTests(TestCase):
         self.assertTrue(bc2.code.startswith('BEN-'), f"Expected BEN- prefix, got: {bc2.code}")
         self.assertNotEqual(bc1.code, bc2.code, "Sequential codes must be unique")
 
-        # Test Bill default code
         beneficiary_ct = ContentType.objects.get_for_model(Beneficiary)
         bill1 = Bill(
             subject_id=str(self.b1.id),
@@ -175,4 +169,81 @@ class BenefitPackageStrategyTests(TestCase):
         self.assertTrue(bill1.code.startswith('BIL-'), f"Expected BIL- prefix, got: {bill1.code}")
         self.assertTrue(bill2.code.startswith('BIL-'), f"Expected BIL- prefix, got: {bill2.code}")
         self.assertNotEqual(bill1.code, bill2.code, "Sequential bill codes must be unique")
+
+    def test_bulk_create_triggers_assign_codes(self):
+        """Verify DB triggers assign codes to bulk-created Bills and BenefitConsumptions."""
+        payroll = Payroll(name="TriggerCodePayroll")
+        payroll.save(user=self.user)
+
+        batch_bill_results = [{
+            'bill_data': {
+                'code': '',  # Empty — DB trigger should assign BIL-YY-XXXXXXXXXX
+                'subject_id': self.b1.id,
+                'subject_type_id': ContentType.objects.get_for_model(Beneficiary).id,
+                'amount_total': 50.0,
+                'date_valid_from': "2020-01-01",
+                'date_valid_to': "2020-12-31",
+                'date_bill': "2020-01-01",
+                'currency_tp_code': "USD",
+                'currency_code': "USD",
+                'status': Bill.Status.VALIDATED
+            },
+            'bill_data_line': [{'amount_total': 50.0, 'date_valid_from': "2020-01-01", 'date_valid_to': "2020-12-31"}],
+            'user': self.user
+        }]
+        batch_benefit_results = [{
+            'benefit_data': {
+                'individual_id': self.i1.id,
+                'code': '',  # Empty — DB trigger should assign BEN-YY-XXXXXXXXXX
+                'amount': 50.0,
+                'status': BenefitConsumptionStatus.ACCEPTED,
+                'date_valid_from': "2020-01-01",
+                'date_valid_to': "2020-12-31",
+            }
+        }]
+
+        IndividualBenefitPackageStrategy.create_and_save_business_entities_batch(
+            batch_bill_results, batch_benefit_results, payroll.id, self.user
+        )
+
+        benefit = BenefitConsumption.objects.filter(
+            payrollbenefitconsumption__payroll=payroll, is_deleted=False
+        ).first()
+        self.assertIsNotNone(benefit)
+        self.assertTrue(benefit.code.startswith('BEN-'), f"Expected BEN- prefix from trigger, got: {benefit.code!r}")
+
+        bill = Bill.objects.filter(
+            benefitattachment__benefit=benefit, is_deleted=False
+        ).first()
+        self.assertIsNotNone(bill)
+        self.assertTrue(bill.code.startswith('BIL-'), f"Expected BIL- prefix from trigger, got: {bill.code!r}")
+
+    def test_calculate_payment_exceed_limit(self):
+        """Verify _calculate_payment_from_precomputed correctly identifies limit exceedances
+        and that _precompute_criteria_matches correctly partitions beneficiaries.
+        """
+        advanced_criteria = [
+            {'custom_filter_condition': 'able_bodied__boolean=True', 'amount': '200'},
+        ]
+        criteria_match_sets = IndividualBenefitPackageStrategy._precompute_criteria_matches(
+            [self.b1, self.b2], advanced_criteria
+        )
+
+        self.assertEqual(len(criteria_match_sets), 1)
+        self.assertIn(self.b1.id, criteria_match_sets[0], "b1 (able_bodied=True) must match criterion")
+        self.assertNotIn(self.b2.id, criteria_match_sets[0], "b2 (able_bodied=False) must not match criterion")
+
+        # b1: base 100 + criteria 200 = 300, limit 150 → exceeds
+        payment_b1, is_exceed_b1 = IndividualBenefitPackageStrategy._calculate_payment_from_precomputed(
+            self.b1, advanced_criteria, criteria_match_sets, 100.0, 150.0
+        )
+        self.assertEqual(payment_b1, 300.0)
+        self.assertTrue(is_exceed_b1, "b1 should exceed limit of 150 (300 > 150)")
+
+        # b2: base 100 only = 100, limit 150 → does not exceed
+        payment_b2, is_exceed_b2 = IndividualBenefitPackageStrategy._calculate_payment_from_precomputed(
+            self.b2, advanced_criteria, criteria_match_sets, 100.0, 150.0
+        )
+        self.assertEqual(payment_b2, 100.0)
+        self.assertFalse(is_exceed_b2, "b2 should not exceed limit (100 < 150)")
 

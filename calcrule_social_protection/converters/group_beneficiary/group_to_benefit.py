@@ -1,5 +1,9 @@
+import logging
+
 from calcrule_social_protection.converters.builder import BuilderToBenefitConverter
 from individual.models import GroupIndividual
+
+logger = logging.getLogger(__name__)
 
 
 class GroupToBenefitConverter(BuilderToBenefitConverter):
@@ -30,33 +34,21 @@ class GroupToBenefitConverter(BuilderToBenefitConverter):
             is_deleted=False,
         ).values_list('group_id', 'recipient_type', 'role', 'individual_id')
 
-        # Build per-group buckets
         group_members = {}
         for group_id, recipient_type, role, individual_id in members:
             group_members.setdefault(group_id, []).append(
                 (recipient_type, role, individual_id)
             )
 
-        # Pick best recipient per group using the same priority as RECIPIENT_LOOKUPS
         primary_type = GroupIndividual.RecipientType.PRIMARY.value
         head_role = GroupIndividual.Role.HEAD.value
         cache = {}
         for group_id, member_list in group_members.items():
-            chosen = None
-            # Priority 1: PRIMARY recipient
-            for rt, rl, ind_id in member_list:
-                if rt == primary_type:
-                    chosen = ind_id
-                    break
-            # Priority 2: HEAD role
-            if chosen is None:
-                for rt, rl, ind_id in member_list:
-                    if rl == head_role:
-                        chosen = ind_id
-                        break
-            # Priority 3: any member
-            if chosen is None and member_list:
-                chosen = member_list[0][2]
+            chosen = (
+                next((ind_id for rt, _, ind_id in member_list if rt == primary_type), None)
+                or next((ind_id for _, rl, ind_id in member_list if rl == head_role), None)
+                or (member_list[0][2] if member_list else None)
+            )
             if chosen is not None:
                 cache[group_id] = chosen
 
@@ -67,6 +59,11 @@ class GroupToBenefitConverter(BuilderToBenefitConverter):
             individual_id = self._recipient_cache.get(entity.group_id)
             if individual_id:
                 benefit["individual_id"] = f"{individual_id}"
+            else:
+                logger.warning(
+                    f"No active recipient found for group {entity.group_id} "
+                    f"(beneficiary {entity.id}); individual_id will be unset."
+                )
             return
 
         # Fallback to per-entity lookup if prefetch wasn't called
@@ -79,3 +76,8 @@ class GroupToBenefitConverter(BuilderToBenefitConverter):
             if recipient:
                 benefit["individual_id"] = f"{recipient.individual.id}"
                 return
+
+        logger.warning(
+            f"No active recipient found for group {entity.group_id} "
+            f"(beneficiary {entity.id}) in fallback lookup; individual_id will be unset."
+        )
