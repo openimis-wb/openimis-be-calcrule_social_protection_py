@@ -66,6 +66,7 @@ logger = logging.getLogger(__name__)
 
         batch_bill_results = []
         batch_benefit_results = []
+        progress_step = max(beneficiary_count // 10, 10) if beneficiary_count >= 10 else 0
 
         for i, beneficiary in enumerate(beneficiaries_list):
             calculated_payment, is_exceed = cls._calculate_payment_from_precomputed(
@@ -106,7 +107,7 @@ logger = logging.getLogger(__name__)
                 batch_bill_results = []
                 batch_benefit_results = []
 
-            if beneficiary_count >= 10 and (i + 1) % (beneficiary_count // 10) == 0:
+            if progress_step and (i + 1) % progress_step == 0:
                 if payroll:
                     if payroll.json_ext is None:
                         payroll.json_ext = {}
