@@ -28,6 +28,7 @@ from calcrule_social_protection.strategies.benefit_package_strategy_interface im
 logger = logging.getLogger(__name__)
 
 
+class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
     BATCH_CHUNK_SIZE = 2000
 
     @classmethod
