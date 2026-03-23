@@ -13,6 +13,7 @@ from payment_cycle.models import PaymentCycle
 from calcrule_social_protection.strategies.benefit_package_individual_strategy import IndividualBenefitPackageStrategy
 from calcrule_social_protection.calculation_rule import SocialProtectionCalculationRule
 
+
 class BenefitPackageStrategyTests(TestCase):
     @classmethod
     def setUpTestData(cls):
