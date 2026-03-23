@@ -15,6 +15,10 @@ class IndividualBenefitPackageStrategy(BaseBenefitPackageStrategy):
     CONVERTER_BENEFIT = BeneficiaryToBenefitConverter
 
     @classmethod
+    def _get_select_related(cls):
+        return ['individual']
+
+    @classmethod
     def convert(cls, payment_plan, **kwargs):
         beneficiary = kwargs.get('beneficiary', None)
         additional_parameters = {

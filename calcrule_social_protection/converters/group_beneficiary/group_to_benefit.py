@@ -24,7 +24,7 @@ class GroupToBenefitConverter(BuilderToBenefitConverter):
 
         The priority is: PRIMARY recipient_type > HEAD role > any member.
         """
-        group_ids = [b.group_id for b in beneficiaries]
+        group_ids = list({b.group_id for b in beneficiaries})
         if not group_ids:
             self._recipient_cache = {}
             return

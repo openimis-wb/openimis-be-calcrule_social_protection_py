@@ -28,8 +28,7 @@ from calcrule_social_protection.strategies.benefit_package_strategy_interface im
 logger = logging.getLogger(__name__)
 
 
-class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
-    is_exceed_limit = False
+    BATCH_CHUNK_SIZE = 2000
 
     @classmethod
     def check_calculation(cls, calculation, payment_plan):
@@ -37,15 +36,13 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
 
     @classmethod
     def calculate(cls, calculation, payment_plan, **kwargs):
-        # 1. Get the list of beneficiares assigned to benefit plan from payment plan
-        # each beneficiary group from benefit plan assigned to this payment plan is a single benefit
         payroll = kwargs.get('payroll', None)
         beneficiaries = kwargs.get('beneficiaries_queryset', None)
         if beneficiaries is None:
             beneficiaries = cls.BENEFICIARY_OBJECT.objects.filter(
                 benefit_plan=payment_plan.benefit_plan, status=BeneficiaryStatus.ACTIVE
             )
-        # 2. Get the parameters from payment plan with fixed and advanced criteria
+
         payment_plan_parameters = payment_plan.json_ext
         user_id, start_date, end_date, payment_cycle = \
             calculation.get_payment_cycle_parameters(**kwargs)
@@ -56,19 +53,21 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
             limit = float(payment_plan_parameters['calculation_rule']['limit_per_single_transaction'])
         advanced_filters_criteria = payment_plan_parameters['advanced_criteria'] if 'advanced_criteria' in payment_plan_parameters else []
 
-        beneficiary_count = len(beneficiaries)
+        beneficiary_count = beneficiaries.count()
         converter = cls._init_converter(cls.CONVERTER, beneficiary_count, payroll)
         converter_benefit = cls._init_converter(cls.CONVERTER_BENEFIT, beneficiary_count, payroll)
-        cls._prefetch_converter_data(converter_benefit, beneficiaries)
+
+        beneficiaries_list = list(beneficiaries.select_related(*cls._get_select_related()))
+        cls._prefetch_converter_data(converter_benefit, beneficiaries_list)
 
         criteria_match_sets = cls._precompute_criteria_matches(
-            beneficiaries, advanced_filters_criteria
+            beneficiaries_list, advanced_filters_criteria
         )
 
         batch_bill_results = []
         batch_benefit_results = []
 
-        for i, beneficiary in enumerate(beneficiaries):
+        for i, beneficiary in enumerate(beneficiaries_list):
             calculated_payment, is_exceed = cls._calculate_payment_from_precomputed(
                 beneficiary, advanced_filters_criteria, criteria_match_sets, payment, limit
             )
@@ -85,14 +84,11 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
             }
 
             if is_exceed:
-                cls.is_exceed_limit = True
-                try:
-                    calculation.run_convert(
-                        payment_plan,
-                        **additional_params
-                    )
-                finally:
-                    cls.is_exceed_limit = False
+                calculation.run_convert(
+                    payment_plan,
+                    is_exceed_limit=True,
+                    **additional_params
+                )
             else:
                 convert_results, convert_results_benefit = cls._collect_convert_results(
                     calculation, payment_plan, **additional_params
@@ -100,13 +96,22 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
                 batch_bill_results.append(convert_results)
                 batch_benefit_results.append(convert_results_benefit)
 
+            if len(batch_bill_results) >= cls.BATCH_CHUNK_SIZE:
+                cls.create_and_save_business_entities_batch(
+                    batch_bill_results,
+                    batch_benefit_results,
+                    payroll.id if payroll else None,
+                    user
+                )
+                batch_bill_results = []
+                batch_benefit_results = []
+
             if beneficiary_count >= 10 and (i + 1) % (beneficiary_count // 10) == 0:
                 if payroll:
                     if payroll.json_ext is None:
                         payroll.json_ext = {}
                     payroll.json_ext['progress'] = int((i + 1) * 100 / beneficiary_count)
                     payroll.save(username=user.login_name)
-
 
         if batch_bill_results:
             cls.create_and_save_business_entities_batch(
@@ -205,8 +210,11 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
         return instance
 
     @classmethod
+    def _get_select_related(cls):
+        return []
+
+    @classmethod
     def _prefetch_converter_data(cls, converter_benefit, beneficiaries):
-        """Hook for subclasses to prefetch data needed by converters."""
         pass
 
     @classmethod
@@ -219,6 +227,7 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
         converter_item = kwargs.get('converter_item')
         converter_benefit = kwargs.get('converter_benefit')
         payment_cycle = kwargs.get('payment_cycle')
+        is_exceed_limit = kwargs.get('is_exceed_limit', False)
         convert_results = cls._convert_entity_to_bill(
             converter, converter_item, payment_plan, entity, amount, end_date, payment_cycle
         )
@@ -227,7 +236,7 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
             converter_benefit, payment_plan, entity, amount, payment_cycle
         )
         user = convert_results['user']
-        if not cls.is_exceed_limit:
+        if not is_exceed_limit:
             cls.create_and_save_business_entities(
                 convert_results,
                 convert_results_benefit,

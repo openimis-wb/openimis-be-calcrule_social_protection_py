@@ -1,13 +1,11 @@
-import decimal
-import uuid
 from django.test import TestCase
 from django.contrib.contenttypes.models import ContentType
 from core.test_helpers import LogInHelper
-from social_protection.models import Beneficiary, BenefitPlan, Project, BeneficiaryStatus
+from social_protection.models import Beneficiary, BenefitPlan, BeneficiaryStatus
 from individual.models import Individual
 from invoice.models import Bill, BillItem
 from payroll.models import (
-    Payroll, BenefitConsumption, BenefitAttachment, 
+    Payroll, BenefitConsumption, BenefitAttachment,
     PayrollBenefitConsumption, BenefitConsumptionStatus
 )
 from contribution_plan.models import PaymentPlan
@@ -17,8 +15,7 @@ from calcrule_social_protection.calculation_rule import SocialProtectionCalculat
 
 class BenefitPackageStrategyTests(TestCase):
     @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
+    def setUpTestData(cls):
         cls.user = LogInHelper().get_or_create_user_api(username='admin_bulk')
 
         bp = BenefitPlan(name="Test BP", date_valid_from="2020-01-01")
@@ -78,7 +75,7 @@ class BenefitPackageStrategyTests(TestCase):
         """Verify that the batch creation method persists all related entities correctly."""
         payroll = Payroll(name="BatchPayroll")
         payroll.save(user=self.user)
-        
+
         batch_bill_results = [{
             'bill_data': {
                 'code': f"BATCH_BILL_{i}",
@@ -101,7 +98,7 @@ class BenefitPackageStrategyTests(TestCase):
             }],
             'user': self.user
         } for i in range(2)]
-        
+
         batch_benefit_results = [{
             'benefit_data': {
                 'individual_id': self.i1.id,
@@ -113,7 +110,7 @@ class BenefitPackageStrategyTests(TestCase):
                 'date_valid_to': "2020-12-31",
             }
         } for i in range(2)]
-        
+
         IndividualBenefitPackageStrategy.create_and_save_business_entities_batch(
             batch_bill_results, batch_benefit_results, payroll.id, self.user
         )

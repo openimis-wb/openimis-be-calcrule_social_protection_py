@@ -16,6 +16,10 @@ class GroupBenefitPackageStrategy(BaseBenefitPackageStrategy):
     CONVERTER_BENEFIT = GroupToBenefitConverter
 
     @classmethod
+    def _get_select_related(cls):
+        return ['group']
+
+    @classmethod
     def convert(cls, payment_plan, **kwargs):
         group = kwargs.get('group', None)
         additional_parameters = {
