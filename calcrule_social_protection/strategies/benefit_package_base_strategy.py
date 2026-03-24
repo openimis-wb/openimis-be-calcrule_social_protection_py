@@ -54,11 +54,10 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
             limit = float(payment_plan_parameters['calculation_rule']['limit_per_single_transaction'])
         advanced_filters_criteria = payment_plan_parameters['advanced_criteria'] if 'advanced_criteria' in payment_plan_parameters else []
 
-        beneficiary_count = beneficiaries.count()
+        beneficiaries_list = list(beneficiaries.select_related(*cls._get_select_related()))
+        beneficiary_count = len(beneficiaries_list)
         converter = cls._init_converter(cls.CONVERTER, beneficiary_count, payroll)
         converter_benefit = cls._init_converter(cls.CONVERTER_BENEFIT, beneficiary_count, payroll)
-
-        beneficiaries_list = list(beneficiaries.select_related(*cls._get_select_related()))
         cls._prefetch_converter_data(converter_benefit, beneficiaries_list)
 
         criteria_match_sets = cls._precompute_criteria_matches(
