@@ -5,7 +5,7 @@ class BuilderToBenefitConverter:
     TYPE = None
 
     def to_benefit_obj(self, entity, amount, payment_plan, payment_cycle):
-        benefit = {}
+        benefit = {'code': ''}
         self._build_individual(benefit, entity)
         self._build_amount(benefit, amount)
         self._build_date_dates(benefit, payment_plan, payment_cycle)

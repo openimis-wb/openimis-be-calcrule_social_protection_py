@@ -11,7 +11,7 @@ class BuilderToBillConverter:
         self._thirdparty_type_id = None
 
     def to_bill_obj(self, payment_plan, entity, amount, end_date, payment_cycle):
-        bill = {}
+        bill = {'code': ''}
         self._build_subject(bill, entity)
         self._build_thirdparty(bill, payment_plan)
         self._build_price(bill, amount)

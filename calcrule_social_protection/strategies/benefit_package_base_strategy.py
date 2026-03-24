@@ -312,7 +312,7 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
                 subject_id=bill_data.get('subject_id'),
                 thirdparty_type_id=bill_data.get('thirdparty_type_id'),
                 thirdparty_id=bill_data.get('thirdparty_id'),
-                code=bill_data.get('code'),
+                code=bill_data.get('code', ''),
                 code_tp=bill_data.get('code_tp'),
                 code_ext=bill_data.get('code_ext'),
                 date_due=bill_data.get('date_due'),
@@ -361,7 +361,7 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
             benefit = BenefitConsumption(
                 id=benefit_uuid,
                 individual_id=benefit_data.get('individual_id'),
-                code=benefit_data.get('code'),
+                code=benefit_data.get('code', ''),
                 date_due=benefit_data.get('date_due'),
                 amount=benefit_data.get('amount'),
                 type=benefit_data.get('type'),
