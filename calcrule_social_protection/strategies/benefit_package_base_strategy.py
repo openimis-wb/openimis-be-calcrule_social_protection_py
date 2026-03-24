@@ -56,8 +56,8 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
 
         beneficiaries_list = list(beneficiaries.select_related(*cls._get_select_related()))
         beneficiary_count = len(beneficiaries_list)
-        converter = cls._init_converter(cls.CONVERTER, beneficiary_count, payroll)
-        converter_benefit = cls._init_converter(cls.CONVERTER_BENEFIT, beneficiary_count, payroll)
+        converter = cls._init_converter(cls.CONVERTER)
+        converter_benefit = cls._init_converter(cls.CONVERTER_BENEFIT)
         cls._prefetch_converter_data(converter_benefit, beneficiaries_list)
 
         criteria_match_sets = cls._precompute_criteria_matches(
@@ -204,11 +204,10 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
         return lookup_path, parsed_value
 
     @classmethod
-    def _init_converter(cls, converter_cls, count, payroll):
+    def _init_converter(cls, converter_cls):
         if converter_cls is None:
             return None
-        instance = converter_cls()
-        return instance
+        return converter_cls()
 
     @classmethod
     def _get_select_related(cls):
@@ -281,6 +280,12 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
         and PayrollBenefitConsumptions in a single transaction.
         """
         now = py_datetime.now()
+
+        if len(batch_bill_results) != len(batch_benefit_results):
+            raise ValueError(
+                f"Mismatch between bill and benefit batch sizes for payroll {payroll_id}: "
+                f"{len(batch_bill_results)} bills vs {len(batch_benefit_results)} benefits"
+            )
 
         bill_instances = []
         bill_item_instances = []

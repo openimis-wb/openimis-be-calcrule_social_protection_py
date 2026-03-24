@@ -24,9 +24,9 @@ class GroupBenefitPackageStrategy(BaseBenefitPackageStrategy):
         group = kwargs.get('group', None)
         additional_parameters = {
             "entity": group,
-            "converter": kwargs.get('converter') or cls._init_converter(cls.CONVERTER, 1, None),
+            "converter": kwargs.get('converter') or cls._init_converter(cls.CONVERTER),
             "converter_item": GroupToBillItemConverter,
-            "converter_benefit": kwargs.get('converter_benefit') or cls._init_converter(cls.CONVERTER_BENEFIT, 1, None),
+            "converter_benefit": kwargs.get('converter_benefit') or cls._init_converter(cls.CONVERTER_BENEFIT),
             **kwargs
         }
         return super().convert(payment_plan, **additional_parameters)
@@ -41,9 +41,9 @@ class GroupBenefitPackageStrategy(BaseBenefitPackageStrategy):
         group = kwargs.get('group', None)
         additional_parameters = {
             "entity": group,
-            "converter": kwargs.get('converter') or cls._init_converter(cls.CONVERTER, 1, None),
+            "converter": kwargs.get('converter') or cls._init_converter(cls.CONVERTER),
             "converter_item": GroupToBillItemConverter,
-            "converter_benefit": kwargs.get('converter_benefit') or cls._init_converter(cls.CONVERTER_BENEFIT, 1, None),
+            "converter_benefit": kwargs.get('converter_benefit') or cls._init_converter(cls.CONVERTER_BENEFIT),
             **kwargs
         }
         return super()._collect_convert_results(calculation, payment_plan, **additional_parameters)

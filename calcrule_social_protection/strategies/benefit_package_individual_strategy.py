@@ -23,9 +23,9 @@ class IndividualBenefitPackageStrategy(BaseBenefitPackageStrategy):
         beneficiary = kwargs.get('beneficiary', None)
         additional_parameters = {
             "entity": beneficiary,
-            "converter": kwargs.get('converter') or cls._init_converter(cls.CONVERTER, 1, None),
+            "converter": kwargs.get('converter') or cls._init_converter(cls.CONVERTER),
             "converter_item": BeneficiaryToBillItemConverter,
-            "converter_benefit": kwargs.get('converter_benefit') or cls._init_converter(cls.CONVERTER_BENEFIT, 1, None),
+            "converter_benefit": kwargs.get('converter_benefit') or cls._init_converter(cls.CONVERTER_BENEFIT),
             **kwargs
         }
         return super().convert(payment_plan, **additional_parameters)
@@ -35,9 +35,9 @@ class IndividualBenefitPackageStrategy(BaseBenefitPackageStrategy):
         beneficiary = kwargs.get('beneficiary', None)
         additional_parameters = {
             "entity": beneficiary,
-            "converter": kwargs.get('converter') or cls._init_converter(cls.CONVERTER, 1, None),
+            "converter": kwargs.get('converter') or cls._init_converter(cls.CONVERTER),
             "converter_item": BeneficiaryToBillItemConverter,
-            "converter_benefit": kwargs.get('converter_benefit') or cls._init_converter(cls.CONVERTER_BENEFIT, 1, None),
+            "converter_benefit": kwargs.get('converter_benefit') or cls._init_converter(cls.CONVERTER_BENEFIT),
             **kwargs
         }
         return super()._collect_convert_results(calculation, payment_plan, **additional_parameters)
