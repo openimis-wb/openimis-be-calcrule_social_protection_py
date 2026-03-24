@@ -305,7 +305,7 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
             bill_uuid = uuid_module.uuid4()
             benefit_uuid = uuid_module.uuid4()
 
-            bill = Bill(
+            bill = cls._stamp_audit(Bill(
                 id=bill_uuid,
                 subject_type_id=bill_data.get('subject_type_id'),
                 subject_id=bill_data.get('subject_id'),
@@ -326,17 +326,11 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
                 amount_net=cls._sum_line_items(bill_line_items, 'amount_total'),
                 amount_total=cls._sum_line_items(bill_line_items, 'amount_total'),
                 amount_discount=cls._sum_line_items(bill_line_items, 'discount'),
-                user_created=user,
-                user_updated=user,
-                date_created=now,
-                date_updated=now,
-                version=1,
-            )
+            ), user, now)
             bill_instances.append(bill)
 
             for line_item_data in bill_line_items:
-                bill_item = BillItem(
-                    id=uuid_module.uuid4(),
+                bill_item = cls._stamp_audit(BillItem(
                     bill_id=bill_uuid,
                     line_type_id=line_item_data.get('line_type_id'),
                     line_id=line_item_data.get('line_id'),
@@ -349,15 +343,10 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
                     deduction=line_item_data.get('deduction', 0),
                     date_valid_from=line_item_data.get('date_valid_from'),
                     date_valid_to=line_item_data.get('date_valid_to'),
-                    user_created=user,
-                    user_updated=user,
-                    date_created=now,
-                    date_updated=now,
-                    version=1,
-                )
+                ), user, now)
                 bill_item_instances.append(bill_item)
 
-            benefit = BenefitConsumption(
+            benefit = cls._stamp_audit(BenefitConsumption(
                 id=benefit_uuid,
                 individual_id=benefit_data.get('individual_id'),
                 code=benefit_data.get('code', ''),
@@ -367,37 +356,20 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
                 status=benefit_data.get('status'),
                 date_valid_from=benefit_data.get('date_valid_from'),
                 date_valid_to=benefit_data.get('date_valid_to'),
-                user_created=user,
-                user_updated=user,
-                date_created=now,
-                date_updated=now,
-                version=1,
-            )
+            ), user, now)
             benefit_instances.append(benefit)
 
-            attachment = BenefitAttachment(
-                id=uuid_module.uuid4(),
+            attachment = cls._stamp_audit(BenefitAttachment(
                 benefit_id=benefit_uuid,
                 bill_id=bill_uuid,
-                user_created=user,
-                user_updated=user,
-                date_created=now,
-                date_updated=now,
-                version=1,
-            )
+            ), user, now)
             attachment_instances.append(attachment)
 
             if payroll_id:
-                pbc = PayrollBenefitConsumption(
-                    id=uuid_module.uuid4(),
+                pbc = cls._stamp_audit(PayrollBenefitConsumption(
                     payroll_id=payroll_id,
                     benefit_id=benefit_uuid,
-                    user_created=user,
-                    user_updated=user,
-                    date_created=now,
-                    date_updated=now,
-                    version=1,
-                )
+                ), user, now)
                 payroll_benefit_instances.append(pbc)
 
         batch_size = len(bill_instances)
@@ -420,27 +392,6 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
                 payroll_service = PayrollService(user=user)
                 payroll_service.bulk_attach_benefits(payroll_benefit_instances)
 
-            # Re-fetch to get trigger-assigned codes, then write history.
-            bill_ids = [b.id for b in bill_instances]
-            bill_item_ids = [bi.id for bi in bill_item_instances]
-            benefit_ids = [b.id for b in benefit_instances]
-            attachment_ids = [a.id for a in attachment_instances]
-
-            persisted_bills = list(Bill.objects.filter(id__in=bill_ids))
-            persisted_bill_items = list(BillItem.objects.filter(id__in=bill_item_ids))
-            persisted_benefits = list(BenefitConsumption.objects.filter(id__in=benefit_ids))
-            persisted_attachments = list(BenefitAttachment.objects.filter(id__in=attachment_ids))
-
-            cls._bulk_write_creation_history(persisted_bills, Bill, user, now)
-            cls._bulk_write_creation_history(persisted_bill_items, BillItem, user, now)
-            cls._bulk_write_creation_history(persisted_benefits, BenefitConsumption, user, now)
-            cls._bulk_write_creation_history(persisted_attachments, BenefitAttachment, user, now)
-
-            if payroll_benefit_instances:
-                pbc_ids = [p.id for p in payroll_benefit_instances]
-                persisted_pbcs = list(PayrollBenefitConsumption.objects.filter(id__in=pbc_ids))
-                cls._bulk_write_creation_history(persisted_pbcs, PayrollBenefitConsumption, user, now)
-
         except Exception:
             logger.error(
                 f"Failed to bulk create entities for payroll {payroll_id} "
@@ -452,32 +403,22 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
         logger.info(f"Bulk creation complete for payroll {payroll_id} ({batch_size} items)")
 
     @staticmethod
+    def _stamp_audit(instance, user, now):
+        """Set audit fields for bulk-created instances (borrowed from core's bulk_save pattern)."""
+        instance.id = instance.id or uuid_module.uuid4()
+        instance.user_created = user
+        instance.user_updated = user
+        instance.date_created = now
+        instance.date_updated = now
+        instance.version = 1
+        return instance
+
+    @staticmethod
     def _sum_line_items(line_items, field):
         return sum(
             decimal.Decimal(str(item.get(field, 0)))
             for item in line_items
         )
-
-    @staticmethod
-    def _bulk_write_creation_history(instances, model_class, user, history_date):
-        """Write simple-history creation records for bulk_create'd entities."""
-        if not instances:
-            return
-
-        HistoricalModel = model_class.history.model
-        concrete_field_names = [field.attname for field in model_class._meta.concrete_fields]
-
-        historical_records = [
-            HistoricalModel(
-                history_type='+',
-                history_date=history_date,
-                history_user=user,
-                history_change_reason=None,
-                **{name: getattr(instance, name) for name in concrete_field_names}
-            )
-            for instance in instances
-        ]
-        HistoricalModel.objects.bulk_create(historical_records, batch_size=500)
 
     @classmethod
     def _convert_entity_to_bill(
