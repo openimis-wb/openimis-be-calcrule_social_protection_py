@@ -179,16 +179,6 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
         is_exceed = (payment > limit) if limit else False
         return payment, is_exceed
 
-    @classmethod
-    def _does_beneficiary_meet_condition(cls, beneficiary, condition):
-        lookup_path, parsed_condition_value = cls._parse_condition(condition)
-        json_key = lookup_path.split('__')[0]
-        if json_key in beneficiary.json_ext:
-            return cls.BENEFICIARY_OBJECT.objects.filter(
-                id=beneficiary.id, **{f'json_ext__{lookup_path}': parsed_condition_value}
-            ).exists()
-        return False
-
     @staticmethod
     def _parse_condition(condition):
         """Parse 'field__type=value' into (lookup_path, parsed_value).
@@ -410,7 +400,8 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
     @staticmethod
     def _stamp_audit(instance, user, now):
         """Set audit fields for bulk-created instances (borrowed from core's bulk_save pattern)."""
-        instance.id = instance.id or uuid_module.uuid4()
+        if not instance.id:
+            instance.id = uuid_module.uuid4()
         instance.user_created = user
         instance.user_updated = user
         instance.date_created = now
