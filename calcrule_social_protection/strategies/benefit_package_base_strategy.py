@@ -194,10 +194,12 @@ class BaseBenefitPackageStrategy(BenefitPackageStrategyInterface):
         return lookup_path, parsed_value
 
     @classmethod
-    def _init_converter(cls, converter_cls):
-        if converter_cls is None:
+    def _init_converter(cls, converter_cls_or_instance):
+        if converter_cls_or_instance is None:
             return None
-        return converter_cls()
+        if isinstance(converter_cls_or_instance, type):
+            return converter_cls_or_instance()
+        return converter_cls_or_instance
 
     @classmethod
     def _get_select_related(cls):

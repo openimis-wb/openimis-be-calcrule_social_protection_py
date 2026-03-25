@@ -129,11 +129,11 @@ class BenefitPackageStrategyTests(TestCase):
 
     def test_db_default_code_generation(self):
         """Verify that DB sequences generate unique codes when no code is provided."""
-        bc1 = BenefitConsumption(individual=self.i1, amount=50, status=BenefitConsumptionStatus.ACCEPTED)
+        bc1 = BenefitConsumption(individual=self.i1, amount=50, status=BenefitConsumptionStatus.ACCEPTED, code='')
         bc1.save(user=self.user)
         bc1.refresh_from_db()
 
-        bc2 = BenefitConsumption(individual=self.i2, amount=75, status=BenefitConsumptionStatus.ACCEPTED)
+        bc2 = BenefitConsumption(individual=self.i2, amount=75, status=BenefitConsumptionStatus.ACCEPTED, code='')
         bc2.save(user=self.user)
         bc2.refresh_from_db()
 
@@ -145,6 +145,7 @@ class BenefitPackageStrategyTests(TestCase):
         bill1 = Bill(
             subject_id=str(self.b1.id),
             subject_type=beneficiary_ct,
+            code='',
             amount_net=100,
             status=Bill.Status.VALIDATED,
             currency_tp_code='USD',
@@ -156,6 +157,7 @@ class BenefitPackageStrategyTests(TestCase):
         bill2 = Bill(
             subject_id=str(self.b2.id),
             subject_type=beneficiary_ct,
+            code='',
             amount_net=200,
             status=Bill.Status.VALIDATED,
             currency_tp_code='USD',
